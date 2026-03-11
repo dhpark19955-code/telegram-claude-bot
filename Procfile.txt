@@ -1,0 +1,1 @@
+worker: python telegram_claude_bot.py
