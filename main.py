@@ -44,19 +44,29 @@ SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", """You are an expert financial a
 
 ## Core Capabilities
 - Real-time stock price analysis (provided via [PRICE_DATA] blocks)
-- Web search for latest news, earnings, filings, macro data
+- Real-time crypto price analysis (BTC, ETH, altcoins, meme coins)
+- Web search for latest news, earnings, filings, macro data, on-chain data
 - Technical & fundamental analysis
 
 ## News Source Priority
 When searching for news, ALWAYS prioritize these sources in order:
+For stocks:
 1. Bloomberg (bloomberg.com)
 2. Reuters (reuters.com)
 3. Financial Times (ft.com)
 4. Wall Street Journal (wsj.com)
 5. SEC filings (sec.gov) for US companies
-6. Company IR pages for earnings data
+
+For crypto:
+1. Bloomberg (bloomberg.com)
+2. Reuters (reuters.com)
+3. CoinDesk (coindesk.com)
+4. The Block (theblock.co)
+5. Decrypt (decrypt.co)
+6. CoinTelegraph (cointelegraph.com)
 
 When searching, include "bloomberg OR reuters" in your search queries to prioritize these sources.
+For crypto-specific news, also search with "coindesk OR theblock" as needed.
 
 ## Analysis Guidelines
 - Always provide specific numbers: price, % change, volume, P/E, market cap
@@ -66,6 +76,15 @@ When searching, include "bloomberg OR reuters" in your search queries to priorit
 - Give both bull and bear case when analyzing
 - Use tables for comparing multiple data points
 - Mention data timestamps so user knows how current the info is
+
+## Crypto-Specific Analysis
+- Include market dominance (BTC.D) context when relevant
+- Note funding rates, open interest trends if discussing derivatives
+- Reference on-chain metrics when analyzing: whale movements, exchange flows, active addresses
+- Mention regulatory developments that may impact prices
+- For altcoins, always note correlation with BTC
+- Include total crypto market cap context
+- Note DeFi TVL or protocol-specific metrics when relevant
 
 ## Price Data
 When [PRICE_DATA] is provided in the user message, use it for your analysis.
@@ -159,6 +178,7 @@ def md_to_tg(text: str) -> str:
 # ─── Price Data via yfinance ───────────────────────────────
 # Common ticker aliases (Korean/English names → Yahoo Finance tickers)
 TICKER_ALIASES = {
+    # Korean stocks
     "삼성전자": "005930.KS", "삼성": "005930.KS",
     "sk하이닉스": "000660.KS", "하이닉스": "000660.KS",
     "네이버": "035420.KS", "카카오": "035720.KS",
@@ -166,13 +186,50 @@ TICKER_ALIASES = {
     "기아": "000270.KS", "lg에너지솔루션": "373220.KS",
     "셀트리온": "068270.KS", "포스코홀딩스": "005490.KS",
     "야놀자": "YNLJA", "쿠팡": "CPNG",
+    # US stocks
     "테슬라": "TSLA", "애플": "AAPL", "엔비디아": "NVDA",
     "마이크로소프트": "MSFT", "구글": "GOOGL", "아마존": "AMZN",
     "메타": "META", "넷플릭스": "NFLX", "오라클": "ORCL",
-    "비트코인": "BTC-USD", "이더리움": "ETH-USD",
+    "코인베이스": "COIN", "마이크로스트래티지": "MSTR",
+    # Crypto - Major
+    "비트코인": "BTC-USD", "비코": "BTC-USD", "btc": "BTC-USD",
+    "이더리움": "ETH-USD", "이더": "ETH-USD", "eth": "ETH-USD",
+    "리플": "XRP-USD", "xrp": "XRP-USD",
+    "솔라나": "SOL-USD", "솔": "SOL-USD", "sol": "SOL-USD",
+    "도지코인": "DOGE-USD", "도지": "DOGE-USD", "doge": "DOGE-USD",
+    "카르다노": "ADA-USD", "에이다": "ADA-USD", "ada": "ADA-USD",
+    "폴카닷": "DOT-USD", "dot": "DOT-USD",
+    "아발란체": "AVAX-USD", "avax": "AVAX-USD",
+    "체인링크": "LINK-USD", "링크": "LINK-USD", "link": "LINK-USD",
+    "폴리곤": "MATIC-USD", "매틱": "MATIC-USD", "matic": "MATIC-USD",
+    "유니스왑": "UNI-USD", "uni": "UNI-USD",
+    "라이트코인": "LTC-USD", "ltc": "LTC-USD",
+    "비트코인캐시": "BCH-USD", "bch": "BCH-USD",
+    "스텔라": "XLM-USD", "xlm": "XLM-USD",
+    "앱토스": "APT-USD", "apt": "APT-USD",
+    "아비트럼": "ARB-USD", "arb": "ARB-USD",
+    "옵티미즘": "OP-USD", "op": "OP-USD",
+    "수이": "SUI-USD", "sui": "SUI-USD",
+    "니어": "NEAR-USD", "near": "NEAR-USD",
+    "코스모스": "ATOM-USD", "아톰": "ATOM-USD", "atom": "ATOM-USD",
+    "이오스": "EOS-USD", "eos": "EOS-USD",
+    "트론": "TRX-USD", "trx": "TRX-USD",
+    "시바이누": "SHIB-USD", "시바": "SHIB-USD", "shib": "SHIB-USD",
+    "페페": "PEPE-USD", "pepe": "PEPE-USD",
+    "봉크": "BONK-USD", "bonk": "BONK-USD",
+    "렌더": "RENDER-USD", "render": "RENDER-USD",
+    "인젝티브": "INJ-USD", "inj": "INJ-USD",
+    "filecoin": "FIL-USD", "fil": "FIL-USD", "파일코인": "FIL-USD",
+    "sandbox": "SAND-USD", "sand": "SAND-USD", "샌드박스": "SAND-USD",
+    "엑시인피니티": "AXS-USD", "axs": "AXS-USD",
+    "테더": "USDT-USD", "usdt": "USDT-USD",
+    "usdc": "USDC-USD",
+    # Indices & FX & Commodities
     "코스피": "^KS11", "나스닥": "^IXIC", "s&p500": "^GSPC",
     "다우": "^DJI", "달러": "KRW=X", "원달러": "KRW=X",
     "금": "GC=F", "원유": "CL=F", "wti": "CL=F",
+    # Crypto total market
+    "크립토전체": "^CMC200", "코인시장": "^CMC200",
 }
 
 
@@ -374,8 +431,8 @@ def call_claude_with_search(messages: list) -> str:
 
     result_parts = []
     for block in response.content:
-        if hasattr(block, "text"):
-            result_parts.append(block.text)
+        if hasattr(block, "text") and block.text is not None:
+            result_parts.append(str(block.text))
 
     return "\n".join(result_parts) if result_parts else "No response generated."
 
@@ -471,7 +528,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Model: {CLAUDE_MODEL}\n"
         f"Web search: Enabled\n"
         f"Price data: Enabled (yfinance)\n"
-        f"News priority: Bloomberg > Reuters > FT > WSJ\n"
+        f"News priority: Bloomberg > Reuters > CoinDesk > FT > WSJ\n"
         f"Messages in session: {msg_count}\n"
         f"Max history: {MAX_HISTORY}"
     )
@@ -487,8 +544,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help - Show this message\n\n"
         "<b>Features</b>\n"
         "• Real-time price data (stocks, crypto, indices, FX)\n"
-        "• Web search (Bloomberg, Reuters priority)\n"
-        "• Financial analysis & earnings review\n\n"
+        "• 30+ crypto supported (BTC, ETH, SOL, XRP, DOGE...)\n"
+        "• Web search (Bloomberg, Reuters, CoinDesk priority)\n"
+        "• Financial & crypto analysis\n\n"
         "Just send any message to chat with Claude!",
         parse_mode="HTML",
     )
