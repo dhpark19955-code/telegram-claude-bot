@@ -586,11 +586,14 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     msg_count = len(conversations.get(user_id, []))
+    krx = "Enabled (data.go.kr)" if price_history.krx_api.get_service_key() else "Disabled (set KRX_SERVICE_KEY)"
     await update.message.reply_text(
         f"User ID: {user_id}\n"
         f"Model: {CLAUDE_MODEL}\n"
         f"Web search: Enabled\n"
         f"Price data: Enabled (yfinance)\n"
+        f"History data: Enabled (FinanceDataReader)\n"
+        f"KRX official API: {krx}\n"
         f"News priority: Bloomberg > Reuters > CoinDesk > FT > WSJ\n"
         f"Messages in session: {msg_count}\n"
         f"Max history: {MAX_HISTORY}"

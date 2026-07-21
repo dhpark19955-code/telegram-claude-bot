@@ -20,7 +20,11 @@ from datetime import date, datetime, timedelta
 import FinanceDataReader as fdr
 import pandas as pd
 
+import krx_api
+
 logger = logging.getLogger(__name__)
+
+_KRX_CODE_RE = re.compile(r"^\d{6}$")
 
 
 # ─── Name → FinanceDataReader symbol aliases ───────────────────────────────
@@ -200,6 +204,17 @@ def fetch_history(name: str, start: date, end: date) -> tuple[str, str, pd.DataF
     symbol = resolve_symbol(name)
     logger.info("fetch_history: %r → symbol=%r %s..%s", name, symbol, start, end)
 
+    # Domestic 6-digit codes → official KRX API (data.go.kr) when a key is set;
+    # fall back to FinanceDataReader on any failure or for non-KRX assets.
+    if _KRX_CODE_RE.match(symbol):
+        service_key = krx_api.get_service_key()
+        if service_key:
+            try:
+                df = krx_api.fetch_krx_daily(symbol, start, end, service_key)
+                return symbol, name, df.dropna(how="all")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("KRX API failed for %s, falling back to FDR: %s", symbol, e)
+
     try:
         df = fdr.DataReader(symbol, start.isoformat(), end.isoformat())
     except Exception as e:  # network / symbol errors
@@ -233,9 +248,12 @@ def summarize(name: str, symbol: str, df: pd.DataFrame) -> str:
             return f"{v:,.2f}"
         return f"{v:,.4f}".rstrip("0").rstrip(".")
 
+    source = df.attrs.get("source", "FinanceDataReader")
+
     lines = [
         f"📈 {name}  (심볼: {symbol})",
         f"기간: {idx_start.date()} ~ {idx_end.date()}  ({len(df)} 거래일)",
+        f"출처: {source}",
         "",
         f"시작 종가 : {fmt(first_close)}",
         f"최종 종가 : {fmt(last_close)}",
