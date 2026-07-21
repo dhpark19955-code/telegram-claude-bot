@@ -4,6 +4,7 @@ Deployable on Railway / any cloud platform.
 """
 
 import os
+import io
 import re
 import html
 import logging
@@ -16,6 +17,8 @@ import mistune
 import yfinance as yf
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
+import price_history
 
 # ─── Logging ───────────────────────────────────────────────
 logging.basicConfig(
@@ -520,6 +523,66 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
 
 
+async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Historical price data over a date range: /history 삼성전자 2024-01-01 2024-06-30
+
+    Fetches OHLCV from FinanceDataReader (KRX / Naver / global), replies with a
+    summary and attaches the full series as a CSV file.
+    """
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text("Not authorized.")
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "사용법: /history <종목/자산> [시작일] [종료일 또는 기간]\n\n"
+            "예시:\n"
+            "• /history 삼성전자 2024-01-01 2024-06-30\n"
+            "• /history 비트코인 1y\n"
+            "• /history 코스피 ytd\n"
+            "• /history AAPL 2024-03-01\n"
+            "• /history 005930 20240101 20240301\n\n"
+            "기간 키워드: 1w, 1m, 3m, 6m, 1y, 3y, 5y, ytd, max (또는 1개월/6개월/1년 …)\n"
+            "날짜 형식: YYYY-MM-DD / YYYY.MM.DD / YYYYMMDD"
+        )
+        return
+
+    try:
+        name, start, end = price_history.parse_query(args)
+    except ValueError as e:
+        await update.message.reply_text(f"입력 오류: {e}")
+        return
+
+    await update.message.chat.send_action("typing")
+
+    try:
+        symbol, _, df = price_history.fetch_history(name, start, end)
+    except ValueError as e:
+        await update.message.reply_text(str(e))
+        return
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"history fetch error: {e}", exc_info=True)
+        await update.message.reply_text(f"데이터 조회 중 오류가 발생했습니다: {str(e)[:200]}")
+        return
+
+    summary = price_history.summarize(name, symbol, df)
+    await update.message.reply_text(f"<pre>{html.escape(summary)}</pre>", parse_mode="HTML")
+
+    # Attach the full series as a CSV file.
+    try:
+        csv_bytes = price_history.to_csv_bytes(df)
+        filename = price_history.csv_filename(symbol, df)
+        await update.message.reply_document(
+            document=io.BytesIO(csv_bytes),
+            filename=filename,
+            caption=f"{name} ({symbol}) — {len(df)} 거래일 CSV",
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"csv send error: {e}", exc_info=True)
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     msg_count = len(conversations.get(user_id, []))
@@ -540,10 +603,13 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/new - Start a new conversation\n"
         "/price AAPL - Quick price lookup\n"
         "/price 삼성전자 - Korean stock lookup\n"
+        "/history 삼성전자 2024-01-01 2024-06-30 - 기간별 가격 데이터 + CSV\n"
+        "/history 비트코인 1y - 최근 1년 데이터\n"
         "/status - Show session info\n"
         "/help - Show this message\n\n"
         "<b>Features</b>\n"
         "• Real-time price data (stocks, crypto, indices, FX)\n"
+        "• 과거 시계열 데이터 (KRX·네이버·글로벌, CSV 첨부)\n"
         "• 30+ crypto supported (BTC, ETH, SOL, XRP, DOGE...)\n"
         "• Web search (Bloomberg, Reuters, CoinDesk priority)\n"
         "• Financial & crypto analysis\n\n"
@@ -569,6 +635,8 @@ def main():
 
     app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("price", cmd_price))
+    app.add_handler(CommandHandler("history", cmd_history))
+    app.add_handler(CommandHandler("hist", cmd_history))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("start", cmd_help))
