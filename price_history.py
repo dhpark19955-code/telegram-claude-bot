@@ -21,6 +21,7 @@ import FinanceDataReader as fdr
 import pandas as pd
 
 import krx_api
+import naver_crawler
 
 logger = logging.getLogger(__name__)
 
@@ -204,8 +205,8 @@ def fetch_history(name: str, start: date, end: date) -> tuple[str, str, pd.DataF
     symbol = resolve_symbol(name)
     logger.info("fetch_history: %r → symbol=%r %s..%s", name, symbol, start, end)
 
-    # Domestic 6-digit codes → official KRX API (data.go.kr) when a key is set;
-    # fall back to FinanceDataReader on any failure or for non-KRX assets.
+    # Domestic 6-digit codes → try sources in order of authority, each falling
+    # back to the next on failure: official KRX API → Naver crawl → FDR.
     if _KRX_CODE_RE.match(symbol):
         service_key = krx_api.get_service_key()
         if service_key:
@@ -213,7 +214,13 @@ def fetch_history(name: str, start: date, end: date) -> tuple[str, str, pd.DataF
                 df = krx_api.fetch_krx_daily(symbol, start, end, service_key)
                 return symbol, name, df.dropna(how="all")
             except Exception as e:  # noqa: BLE001
-                logger.warning("KRX API failed for %s, falling back to FDR: %s", symbol, e)
+                logger.warning("KRX API failed for %s, trying Naver: %s", symbol, e)
+
+        try:
+            df = naver_crawler.fetch_naver_daily(symbol, start, end)
+            return symbol, name, df.dropna(how="all")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Naver crawl failed for %s, falling back to FDR: %s", symbol, e)
 
     try:
         df = fdr.DataReader(symbol, start.isoformat(), end.isoformat())
