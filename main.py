@@ -1,21 +1,26 @@
 """
-Telegram bot powered by Anthropic Claude API with web search + price analysis.
-Deployable on Railway / any cloud platform.
+Telegram bot for price data only.
+
+Two things:
+  • /price   — real-time / delayed quote snapshot (Yahoo Finance via yfinance)
+  • /history — historical OHLCV over a date range (KRX official API → Naver
+               crawl → FinanceDataReader), returned as a summary + CSV file
+
+News / chat / LLM features intentionally live in a separate bot.
 """
 
 import os
+import io
 import re
 import html
 import logging
 from pathlib import Path
-from datetime import datetime, timedelta
-from collections import defaultdict
 
-import anthropic
-import mistune
 import yfinance as yf
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
+import price_history
 
 # ─── Logging ───────────────────────────────────────────────
 logging.basicConfig(
@@ -35,148 +40,11 @@ if ENV_FILE.exists():
 
 # ─── Config ────────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 ALLOWED_USERS = [int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") if x.strip()]
-CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-20250514")
-MAX_HISTORY = int(os.environ.get("MAX_HISTORY", "50"))
-
-SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", """You are an expert financial analyst assistant on Telegram with real-time data access.
-
-## Core Capabilities
-- Real-time stock price analysis (provided via [PRICE_DATA] blocks)
-- Real-time crypto price analysis (BTC, ETH, altcoins, meme coins)
-- Web search for latest news, earnings, filings, macro data, on-chain data
-- Technical & fundamental analysis
-
-## News Source Priority
-When searching for news, ALWAYS prioritize these sources in order:
-For stocks:
-1. Bloomberg (bloomberg.com)
-2. Reuters (reuters.com)
-3. Financial Times (ft.com)
-4. Wall Street Journal (wsj.com)
-5. SEC filings (sec.gov) for US companies
-
-For crypto:
-1. Bloomberg (bloomberg.com)
-2. Reuters (reuters.com)
-3. CoinDesk (coindesk.com)
-4. The Block (theblock.co)
-5. Decrypt (decrypt.co)
-6. CoinTelegraph (cointelegraph.com)
-
-When searching, include "bloomberg OR reuters" in your search queries to prioritize these sources.
-For crypto-specific news, also search with "coindesk OR theblock" as needed.
-
-## Analysis Guidelines
-- Always provide specific numbers: price, % change, volume, P/E, market cap
-- Compare against sector peers and indices when relevant
-- Note key support/resistance levels for price analysis
-- Identify catalysts: earnings, macro events, sector trends
-- Give both bull and bear case when analyzing
-- Use tables for comparing multiple data points
-- Mention data timestamps so user knows how current the info is
-
-## Crypto-Specific Analysis
-- Include market dominance (BTC.D) context when relevant
-- Note funding rates, open interest trends if discussing derivatives
-- Reference on-chain metrics when analyzing: whale movements, exchange flows, active addresses
-- Mention regulatory developments that may impact prices
-- For altcoins, always note correlation with BTC
-- Include total crypto market cap context
-- Note DeFi TVL or protocol-specific metrics when relevant
-
-## Price Data
-When [PRICE_DATA] is provided in the user message, use it for your analysis.
-This data comes from Yahoo Finance and includes real-time/delayed quotes.
-
-## Formatting
-- Use markdown for clean formatting
-- Keep responses focused and data-driven
-- Use bullet points for key takeaways
-- Bold important numbers and conclusions
-""")
-
-# ─── Anthropic Client ─────────────────────────────────────
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
-# ─── In-memory conversation history ───────────────────────
-conversations: dict[int, list] = defaultdict(list)
-
-# ─── Telegram-compatible Markdown renderer ─────────────────
-class TelegramRenderer(mistune.HTMLRenderer):
-    def heading(self, text, level, **attrs):
-        return f"<b>{text}</b>\n\n"
-
-    def paragraph(self, text):
-        return f"{text}\n\n"
-
-    def list(self, text, ordered, **attrs):
-        return text + "\n"
-
-    def list_item(self, text, **attrs):
-        return f"• {text}\n"
-
-    def block_code(self, code, info=None):
-        return f"<pre>{html.escape(code.strip())}</pre>\n\n"
-
-    def codespan(self, text):
-        return f"<code>{html.escape(text)}</code>"
-
-    def emphasis(self, text):
-        return f"<i>{text}</i>"
-
-    def strong(self, text):
-        return f"<b>{text}</b>"
-
-    def strikethrough(self, text):
-        return f"<s>{text}</s>"
-
-    def link(self, text, url, title=None):
-        return f'<a href="{html.escape(url)}">{text}</a>'
-
-    def image(self, text, url, title=None):
-        return f"[Image: {text}]"
-
-    def block_quote(self, text):
-        return f"<blockquote>{text}</blockquote>\n"
-
-    def thematic_break(self):
-        return "\n---\n\n"
-
-    def linebreak(self):
-        return "\n"
-
-    def table(self, text):
-        return f"<pre>{text}</pre>\n\n"
-
-    def table_head(self, text):
-        return text + "─" * 20 + "\n"
-
-    def table_body(self, text):
-        return text
-
-    def table_row(self, text):
-        return text + "\n"
-
-    def table_cell(self, text, align=None, head=False):
-        if head:
-            return f"<b>{text}</b> │ "
-        return f"{text} │ "
 
 
-md = mistune.create_markdown(
-    renderer=TelegramRenderer(escape=False),
-    plugins=["strikethrough", "table", "task_lists", "url"],
-)
-
-
-def md_to_tg(text: str) -> str:
-    return md(text).strip()
-
-
-# ─── Price Data via yfinance ───────────────────────────────
-# Common ticker aliases (Korean/English names → Yahoo Finance tickers)
+# ─── Real-time quote via yfinance ──────────────────────────
+# Aliases (Korean/English names → Yahoo Finance tickers) for /price snapshots.
 TICKER_ALIASES = {
     # Korean stocks
     "삼성전자": "005930.KS", "삼성": "005930.KS",
@@ -185,7 +53,7 @@ TICKER_ALIASES = {
     "현대차": "005380.KS", "현대자동차": "005380.KS",
     "기아": "000270.KS", "lg에너지솔루션": "373220.KS",
     "셀트리온": "068270.KS", "포스코홀딩스": "005490.KS",
-    "야놀자": "YNLJA", "쿠팡": "CPNG",
+    "쿠팡": "CPNG",
     # US stocks
     "테슬라": "TSLA", "애플": "AAPL", "엔비디아": "NVDA",
     "마이크로소프트": "MSFT", "구글": "GOOGL", "아마존": "AMZN",
@@ -201,73 +69,48 @@ TICKER_ALIASES = {
     "폴카닷": "DOT-USD", "dot": "DOT-USD",
     "아발란체": "AVAX-USD", "avax": "AVAX-USD",
     "체인링크": "LINK-USD", "링크": "LINK-USD", "link": "LINK-USD",
-    "폴리곤": "MATIC-USD", "매틱": "MATIC-USD", "matic": "MATIC-USD",
-    "유니스왑": "UNI-USD", "uni": "UNI-USD",
     "라이트코인": "LTC-USD", "ltc": "LTC-USD",
-    "비트코인캐시": "BCH-USD", "bch": "BCH-USD",
-    "스텔라": "XLM-USD", "xlm": "XLM-USD",
-    "앱토스": "APT-USD", "apt": "APT-USD",
-    "아비트럼": "ARB-USD", "arb": "ARB-USD",
-    "옵티미즘": "OP-USD", "op": "OP-USD",
-    "수이": "SUI-USD", "sui": "SUI-USD",
-    "니어": "NEAR-USD", "near": "NEAR-USD",
-    "코스모스": "ATOM-USD", "아톰": "ATOM-USD", "atom": "ATOM-USD",
-    "이오스": "EOS-USD", "eos": "EOS-USD",
     "트론": "TRX-USD", "trx": "TRX-USD",
     "시바이누": "SHIB-USD", "시바": "SHIB-USD", "shib": "SHIB-USD",
     "페페": "PEPE-USD", "pepe": "PEPE-USD",
-    "봉크": "BONK-USD", "bonk": "BONK-USD",
-    "렌더": "RENDER-USD", "render": "RENDER-USD",
-    "인젝티브": "INJ-USD", "inj": "INJ-USD",
-    "filecoin": "FIL-USD", "fil": "FIL-USD", "파일코인": "FIL-USD",
-    "sandbox": "SAND-USD", "sand": "SAND-USD", "샌드박스": "SAND-USD",
-    "엑시인피니티": "AXS-USD", "axs": "AXS-USD",
-    "테더": "USDT-USD", "usdt": "USDT-USD",
-    "usdc": "USDC-USD",
     # Indices & FX & Commodities
     "코스피": "^KS11", "나스닥": "^IXIC", "s&p500": "^GSPC",
     "다우": "^DJI", "달러": "KRW=X", "원달러": "KRW=X",
     "금": "GC=F", "원유": "CL=F", "wti": "CL=F",
-    # Crypto total market
-    "크립토전체": "^CMC200", "코인시장": "^CMC200",
 }
 
 
 def extract_tickers(text: str) -> list[str]:
-    """Extract potential ticker symbols from user message."""
+    """Extract potential ticker symbols from a message."""
     tickers = []
     lower = text.lower()
 
-    # Check aliases
     for alias, ticker in TICKER_ALIASES.items():
         if alias in lower:
             tickers.append(ticker)
 
-    # Check for explicit tickers (e.g., $AAPL, TSLA)
     explicit = re.findall(r'\$?([A-Z]{1,5}(?:\.[A-Z]{1,2})?)\b', text)
     for t in explicit:
         if len(t) >= 2 and t not in ("OR", "AN", "IS", "IT", "AT", "ON", "IN", "TO", "IF", "NO", "DO", "SO", "BY", "UP"):
             tickers.append(t)
 
-    return list(dict.fromkeys(tickers))  # deduplicate, preserve order
+    return list(dict.fromkeys(tickers))  # dedupe, preserve order
 
 
 def get_price_data(ticker: str) -> str:
-    """Fetch price data for a ticker using yfinance."""
+    """Fetch a real-time/delayed quote snapshot for a ticker using yfinance."""
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
 
         if not info or info.get("regularMarketPrice") is None:
-            # Try fast_info as fallback
             fi = stock.fast_info
             if fi and hasattr(fi, "last_price") and fi.last_price:
                 return (
                     f"Ticker: {ticker}\n"
                     f"Price: {fi.last_price:.2f}\n"
                     f"Previous Close: {fi.previous_close:.2f}\n"
-                    f"Change: {((fi.last_price - fi.previous_close) / fi.previous_close * 100):.2f}%\n"
-                    f"Market Cap: {fi.market_cap:,.0f}\n" if hasattr(fi, "market_cap") and fi.market_cap else ""
+                    f"Change: {((fi.last_price - fi.previous_close) / fi.previous_close * 100):.2f}%"
                 )
             return f"Ticker {ticker}: No data available"
 
@@ -289,44 +132,24 @@ def get_price_data(ticker: str) -> str:
             ("regularMarketDayLow", "Day Low"),
             ("regularMarketVolume", "Volume"),
             ("marketCap", "Market Cap"),
-            ("trailingPE", "P/E (TTM)"),
-            ("forwardPE", "P/E (Fwd)"),
             ("fiftyTwoWeekHigh", "52W High"),
             ("fiftyTwoWeekLow", "52W Low"),
             ("fiftyDayAverage", "50D MA"),
             ("twoHundredDayAverage", "200D MA"),
-            ("dividendYield", "Div Yield"),
-            ("beta", "Beta"),
-            ("trailingEps", "EPS (TTM)"),
-            ("revenueGrowth", "Revenue Growth"),
-            ("earningsGrowth", "Earnings Growth"),
         ]:
             val = info.get(key)
             if val is not None:
                 if key == "marketCap":
                     if val >= 1e12:
-                        parts.append(f"{label}: ${val/1e12:.2f}T")
+                        parts.append(f"{label}: {val/1e12:.2f}T")
                     elif val >= 1e9:
-                        parts.append(f"{label}: ${val/1e9:.2f}B")
+                        parts.append(f"{label}: {val/1e9:.2f}B")
                     else:
-                        parts.append(f"{label}: ${val/1e6:.2f}M")
+                        parts.append(f"{label}: {val/1e6:.2f}M")
                 elif key == "regularMarketVolume":
                     parts.append(f"{label}: {val:,.0f}")
-                elif key in ("dividendYield", "revenueGrowth", "earningsGrowth"):
-                    parts.append(f"{label}: {val*100:.2f}%")
                 else:
                     parts.append(f"{label}: {val}")
-
-        # Recent price history (5 days)
-        try:
-            hist = stock.history(period="5d")
-            if not hist.empty:
-                parts.append("\nRecent 5-day prices:")
-                for date, row in hist.iterrows():
-                    d = date.strftime("%m/%d")
-                    parts.append(f"  {d}: O={row['Open']:.2f} H={row['High']:.2f} L={row['Low']:.2f} C={row['Close']:.2f} V={row['Volume']:,.0f}")
-        except Exception:
-            pass
 
         return "\n".join(parts)
 
@@ -335,219 +158,138 @@ def get_price_data(ticker: str) -> str:
         return f"Ticker {ticker}: Error fetching data - {str(e)[:100]}"
 
 
-def enrich_with_price_data(message: str) -> str:
-    """If tickers are detected, fetch price data and append to message."""
-    tickers = extract_tickers(message)
-    if not tickers:
-        return message
-
-    price_blocks = []
-    for ticker in tickers[:5]:  # max 5 tickers per message
-        data = get_price_data(ticker)
-        price_blocks.append(data)
-
-    if price_blocks:
-        enriched = message + "\n\n[PRICE_DATA]\n" + "\n---\n".join(price_blocks) + "\n[/PRICE_DATA]"
-        return enriched
-
-    return message
-
-
 # ─── Helpers ───────────────────────────────────────────────
 def is_authorized(user_id: int) -> bool:
     return not ALLOWED_USERS or user_id in ALLOWED_USERS
 
 
-def trim_history(history: list) -> list:
-    if len(history) > MAX_HISTORY:
-        return history[-MAX_HISTORY:]
-    return history
+_DATE_TOKEN_RE = re.compile(r"\d{4}[-./]\d{1,2}[-./]\d{1,2}|\d{8}")
 
 
-async def send_long_message(update: Update, text: str, parse_mode: str = "HTML"):
-    if len(text) <= 4000:
-        await update.message.reply_text(text, parse_mode=parse_mode)
-        return
-
-    chunks = []
-    current = ""
-    for part in text.split("\n\n"):
-        if len(current) + len(part) + 2 > 4000:
-            if current:
-                chunks.append(current.strip())
-            current = part
-        else:
-            current = current + "\n\n" + part if current else part
-    if current:
-        chunks.append(current.strip())
-
-    for chunk in chunks:
-        await update.message.reply_text(chunk, parse_mode=parse_mode)
+def _looks_like_history(tokens: list[str]) -> bool:
+    """True if any token is a date or a relative-window keyword."""
+    for tok in tokens:
+        if _DATE_TOKEN_RE.fullmatch(tok):
+            return True
+        if tok.strip().lower() in price_history.WINDOW_ALIASES:
+            return True
+    return False
 
 
-def call_claude_with_search(messages: list) -> str:
-    """Call Claude API with web search tool enabled."""
-    response = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=4096,
-        system=SYSTEM_PROMPT,
-        tools=[
-            {
-                "type": "web_search_20250305",
-                "name": "web_search",
-                "max_uses": 5,
-            }
-        ],
-        messages=messages,
-    )
-
-    while response.stop_reason == "tool_use":
-        messages.append({"role": "assistant", "content": response.content})
-
-        tool_result_blocks = []
-        for block in response.content:
-            if block.type == "server_tool_use":
-                tool_result_blocks.append({
-                    "type": "server_tool_result",
-                    "tool_use_id": block.id,
-                })
-
-        if tool_result_blocks:
-            messages.append({"role": "user", "content": tool_result_blocks})
-
-        response = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=4096,
-            system=SYSTEM_PROMPT,
-            tools=[
-                {
-                    "type": "web_search_20250305",
-                    "name": "web_search",
-                    "max_uses": 5,
-                }
-            ],
-            messages=messages,
-        )
-
-    result_parts = []
-    for block in response.content:
-        if hasattr(block, "text") and block.text is not None:
-            result_parts.append(str(block.text))
-
-    return "\n".join(result_parts) if result_parts else "No response generated."
-
-
-# ─── Handlers ──────────────────────────────────────────────
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    if not is_authorized(user_id):
-        await update.message.reply_text("Not authorized.")
-        return
-
-    message = update.message.text
-    history = conversations[user_id]
-
-    # Enrich message with price data if tickers are detected
-    enriched_message = enrich_with_price_data(message)
-
-    # Store original message in history (not enriched)
-    history.append({"role": "user", "content": message})
-    history = trim_history(history)
-    conversations[user_id] = history
-
-    await update.message.chat.send_action("typing")
-
-    try:
-        # Build API messages: use enriched message for the latest one
-        api_messages = []
-        for msg in history[:-1]:
-            api_messages.append(msg.copy())
-        # Last message uses enriched version
-        api_messages.append({"role": "user", "content": enriched_message})
-
-        assistant_text = call_claude_with_search(api_messages)
-
-        history.append({"role": "assistant", "content": assistant_text})
-        conversations[user_id] = trim_history(history)
-
-        tg_html = md_to_tg(assistant_text)
-        await send_long_message(update, tg_html)
-
-    except anthropic.APIError as e:
-        logger.error(f"Anthropic API error: {e}")
-        await update.message.reply_text(f"API error: {e.message}")
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}", exc_info=True)
-        try:
-            await update.message.reply_text(str(e)[:4000])
-        except Exception:
-            await update.message.reply_text("An error occurred. Please try again.")
-
-
-async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conversations[user_id] = []
-    await update.message.reply_text("Session cleared. Next message starts fresh.")
-
-
-async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Quick price lookup: /price AAPL"""
-    user_id = update.effective_user.id
-    if not is_authorized(user_id):
-        await update.message.reply_text("Not authorized.")
-        return
-
-    args = context.args
-    if not args:
-        await update.message.reply_text("Usage: /price AAPL or /price 삼성전자")
-        return
-
-    query = " ".join(args).strip()
+async def _reply_price(update: Update, query: str):
     tickers = extract_tickers(query)
     if not tickers:
-        # Try as raw ticker
         tickers = [query.upper()]
-
     await update.message.chat.send_action("typing")
-
-    results = []
-    for ticker in tickers[:3]:
-        data = get_price_data(ticker)
-        results.append(data)
-
+    results = [get_price_data(t) for t in tickers[:3]]
     text = "\n\n---\n\n".join(results)
     await update.message.reply_text(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
 
 
+async def _reply_history(update: Update, tokens: list[str]):
+    try:
+        name, start, end = price_history.parse_query(tokens)
+    except ValueError as e:
+        await update.message.reply_text(f"입력 오류: {e}")
+        return
+
+    await update.message.chat.send_action("typing")
+    try:
+        symbol, _, df = price_history.fetch_history(name, start, end)
+    except ValueError as e:
+        await update.message.reply_text(str(e))
+        return
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"history fetch error: {e}", exc_info=True)
+        await update.message.reply_text(f"데이터 조회 중 오류가 발생했습니다: {str(e)[:200]}")
+        return
+
+    summary = price_history.summarize(name, symbol, df)
+    await update.message.reply_text(f"<pre>{html.escape(summary)}</pre>", parse_mode="HTML")
+
+    try:
+        csv_bytes = price_history.to_csv_bytes(df)
+        filename = price_history.csv_filename(symbol, df)
+        await update.message.reply_document(
+            document=io.BytesIO(csv_bytes),
+            filename=filename,
+            caption=f"{name} ({symbol}) — {len(df)} 거래일 CSV",
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"csv send error: {e}", exc_info=True)
+
+
+# ─── Handlers ──────────────────────────────────────────────
+async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Real-time quote snapshot: /price AAPL"""
+    if not is_authorized(update.effective_user.id):
+        await update.message.reply_text("Not authorized.")
+        return
+    if not context.args:
+        await update.message.reply_text("사용법: /price AAPL  또는  /price 삼성전자")
+        return
+    await _reply_price(update, " ".join(context.args).strip())
+
+
+async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Historical OHLCV over a date range: /history 삼성전자 2024-01-01 2024-06-30"""
+    if not is_authorized(update.effective_user.id):
+        await update.message.reply_text("Not authorized.")
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "사용법: /history <종목/자산> [시작일] [종료일 또는 기간]\n\n"
+            "예시:\n"
+            "• /history 삼성전자 2024-01-01 2024-06-30\n"
+            "• /history 비트코인 1y\n"
+            "• /history 코스피 ytd\n"
+            "• /history AAPL 2024-03-01\n"
+            "• /history 005930 20240101 20240301\n\n"
+            "기간 키워드: 1w, 1m, 3m, 6m, 1y, 3y, 5y, ytd, max (또는 1개월/6개월/1년 …)\n"
+            "날짜 형식: YYYY-MM-DD / YYYY.MM.DD / YYYYMMDD"
+        )
+        return
+    await _reply_history(update, context.args)
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Plain text → history if it carries a date/window, else a price snapshot."""
+    if not is_authorized(update.effective_user.id):
+        await update.message.reply_text("Not authorized.")
+        return
+    tokens = (update.message.text or "").split()
+    if not tokens:
+        return
+    if _looks_like_history(tokens):
+        await _reply_history(update, tokens)
+    else:
+        await _reply_price(update, update.message.text.strip())
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    msg_count = len(conversations.get(user_id, []))
+    krx = "Enabled (data.go.kr)" if price_history.krx_api.get_service_key() else "Disabled (set KRX_SERVICE_KEY)"
     await update.message.reply_text(
-        f"User ID: {user_id}\n"
-        f"Model: {CLAUDE_MODEL}\n"
-        f"Web search: Enabled\n"
-        f"Price data: Enabled (yfinance)\n"
-        f"News priority: Bloomberg > Reuters > CoinDesk > FT > WSJ\n"
-        f"Messages in session: {msg_count}\n"
-        f"Max history: {MAX_HISTORY}"
+        f"User ID: {update.effective_user.id}\n"
+        f"Quote (real-time): yfinance\n"
+        f"History (time series): KRX API → Naver → FinanceDataReader\n"
+        f"KRX official API: {krx}\n"
+        f"Allowed users: {ALLOWED_USERS or 'Everyone'}"
     )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "<b>Commands</b>\n\n"
-        "/new - Start a new conversation\n"
-        "/price AAPL - Quick price lookup\n"
-        "/price 삼성전자 - Korean stock lookup\n"
-        "/status - Show session info\n"
-        "/help - Show this message\n\n"
-        "<b>Features</b>\n"
-        "• Real-time price data (stocks, crypto, indices, FX)\n"
-        "• 30+ crypto supported (BTC, ETH, SOL, XRP, DOGE...)\n"
-        "• Web search (Bloomberg, Reuters, CoinDesk priority)\n"
-        "• Financial & crypto analysis\n\n"
-        "Just send any message to chat with Claude!",
+        "<b>가격 데이터 봇</b>\n\n"
+        "<b>Commands</b>\n"
+        "/price 삼성전자 — 실시간 시세 스냅샷\n"
+        "/history 삼성전자 2024-01-01 2024-06-30 — 기간별 시계열 + CSV\n"
+        "/history 비트코인 1y — 최근 1년\n"
+        "/status — 데이터 소스 상태\n"
+        "/help — 이 도움말\n\n"
+        "<b>Tip</b>\n"
+        "• 그냥 <code>삼성전자</code> 라고 보내면 실시간 시세\n"
+        "• <code>삼성전자 2024-01-01 2024-06-30</code> 처럼 날짜를 넣으면 시계열\n"
+        "• 지원: 국내/미국 주식, 지수, 환율, 원자재, 코인",
         parse_mode="HTML",
     )
 
@@ -557,22 +299,20 @@ def main():
     if not BOT_TOKEN:
         print("ERROR: Set TELEGRAM_BOT_TOKEN environment variable")
         return
-    if not ANTHROPIC_API_KEY:
-        print("ERROR: Set ANTHROPIC_API_KEY environment variable")
-        return
 
-    logger.info(f"Starting bot with model: {CLAUDE_MODEL}")
-    logger.info("Web search: Enabled | Price data: Enabled | News: Bloomberg/Reuters priority")
+    logger.info("Starting price bot")
+    logger.info(f"KRX official API: {'on' if price_history.krx_api.get_service_key() else 'off'}")
     logger.info(f"Allowed users: {ALLOWED_USERS or 'Everyone'}")
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("price", cmd_price))
+    app.add_handler(CommandHandler("history", cmd_history))
+    app.add_handler(CommandHandler("hist", cmd_history))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("start", cmd_help))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Bot is running.")
     app.run_polling()
