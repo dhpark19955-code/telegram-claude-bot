@@ -33,15 +33,28 @@ python screen_control_disputes.py          # 구조 프록시 스코어만으로
 
 ### 보유목적 확정 (로컬 전용)
 
-서식은 보유목적의 **프록시**일 뿐이다. 확정 판정에는 보고서 본문의
-`보유목적`(경영참여/단순투자/일반투자) 텍스트가 필요하다. 웹 컨테이너에서는
-`dart.fss.or.kr` 이 차단되므로 **로컬에서** 다음을 실행한다.
+서식은 보유목적의 **프록시**일 뿐이다. 확정 판정에는 보고 본문/사유 텍스트가
+필요하다. 웹 컨테이너에서는 `dart.fss.or.kr` · `opendart.fss.or.kr` 이 모두
+egress 정책으로 차단되므로(우회 안 함) **로컬에서** 다음을 실행한다.
 
 ```bash
-# .env 에 DART_API_KEY=... (하드코딩 금지, .gitignore 에 포함됨)
+# 키를 screening/.env 에 저장 (하드코딩 금지, .gitignore 에 포함됨)
+echo 'DART_API_KEY=<키>' > screening/.env
+
 python dart_holding_purpose.py             # -> detail_purpose.csv 생성
-python screen_control_disputes.py          # rcp 기준 자동 join, 확정 스코어(+5) 반영
+python screen_control_disputes.py          # rcp(접수번호) 기준 자동 join, 확정 +5 반영
 ```
+
+`dart_holding_purpose.py` 는 두 경로를 지원한다(`.env` 자동 로드):
+
+- **`USE_API=True`(기본, 권장)** — OpenDART API. `corpCode.xml` 로 종목명→고유번호를
+  자동 매핑(`corp_map.csv` 캐시)한 뒤 `majorstock` 을 받아 접수번호·보고사유·
+  보유비율·직전비율을 한 번에 수집. 종목당 1콜(≈1,197콜).
+- **`USE_API=False`** — 키 없을 때 웹 스크래핑. 본문 `보유목적`(경영참여/단순투자)
+  분류까지 뽑지만 일반보고 2,926건을 개별 조회해 느리고 스로틀링 위험.
+
+두 경로 모두 `rcp`(접수번호) 컬럼을 내보내므로 스크린이 동일하게 join 한다.
+판별 문구는 `보유목적`(웹) 또는 `보고사유`(API)에서 `경영권|경영참여` 를 찾는다.
 
 ## 한계
 

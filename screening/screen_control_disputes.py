@@ -66,21 +66,26 @@ def merge_purpose(ilban: pd.DataFrame) -> pd.DataFrame:
         ilban["경영권목적확정"] = pd.NA  # 미확인
         return ilban
     d = pd.read_csv(DETAIL, dtype=str).fillna("")
-    key = "rcp" if "rcp" in d.columns else d.columns[0]
-    pcol = "보유목적" if "보유목적" in d.columns else None
-    if pcol is None:
+    if "rcp" not in d.columns:
         ilban["보유목적"] = ""
         ilban["경영권목적확정"] = pd.NA
         return ilban
-    d = d[[key, pcol]].rename(columns={key: "rcp", pcol: "보유목적"})
+    # 보유목적(웹경로) + 보고사유(API경로) 중 있는 것을 판별 텍스트로 합침
+    d["_판별"] = ""
+    for c in ("보유목적", "보고사유"):
+        if c in d.columns:
+            d["_판별"] = (d["_판별"] + " " + d[c].fillna("")).str.strip()
+    d = d[["rcp", "_판별"]].rename(columns={"_판별": "보유목적"})
+    d = d[d["rcp"].astype(str).str.len() > 0].drop_duplicates("rcp")
     ilban = ilban.merge(d, on="rcp", how="left")
+    have = ilban["보유목적"].notna()          # 상세를 실제로 받은 행만 확정 판정 대상
     ilban["보유목적"] = ilban["보유목적"].fillna("")
-    # '경영참여' / '경영권' 문구가 있으면 확정 True, 텍스트는 있으나 없으면 False, 없으면 NA
-    def flag(t):
-        if not t:
-            return pd.NA
-        return bool(re.search(r"경영권|경영참여|경영 참여", t))
-    ilban["경영권목적확정"] = ilban["보유목적"].map(flag)
+    # '경영참여'/'경영권' 문구 있으면 True, 텍스트는 받았으나 없으면 False, 못 받았으면 NA
+    pat = re.compile(r"경영권|경영\s*참여")
+    ilban["경영권목적확정"] = [
+        (bool(pat.search(t)) if h else pd.NA)
+        for t, h in zip(ilban["보유목적"], have)
+    ]
     return ilban
 
 
