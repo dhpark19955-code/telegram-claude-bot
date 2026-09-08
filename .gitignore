@@ -1,0 +1,11 @@
+# secrets
+.env
+.env.*
+
+# generated locally (DART 수집 결과 / 캐시)
+screening/detail_purpose.csv
+screening/corp_map.csv
+
+# python
+__pycache__/
+*.pyc
